@@ -9,10 +9,11 @@ app = FastAPI()
 
 # Catch-all CORS handling
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+CORSMiddleware,
+allow_origins=["*"],
+allow_methods=["POST", "GET", "OPTIONS"],
+allow_headers=["Content-Type", "Authorization"],
+expose_headers=["Access-Control-Allow-Origin"],
 )
 
 class AnalyticsRequest(BaseModel):
