@@ -2,83 +2,84 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
-import statistics
 import os
+import math
 
 app = FastAPI()
 
-# Enable CORS for POST requests from any origin
+# Catch-all CORS handling
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["POST"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Define the expected format of the incoming request body
-class LatencyRequest(BaseModel):
+class AnalyticsRequest(BaseModel):
     regions: list[str]
     threshold_ms: float
 
-# Load the telemetry data
-# Since this runs in a serverless environment, we need to locate the file relative to this script
-current_dir = os.path.dirname(os.path.realpath(__file__))
-# The json file is in the root directory, one level up from the api directory
-data_file_path = os.path.join(current_dir, '..', 'q-vercel-latency.json')
-
-try:
-    with open(data_file_path, 'r') as f:
-        telemetry_data = json.load(f)
-except FileNotFoundError:
-    # Fallback in case paths are slightly different during Vercel deployment
-    telemetry_data = [] 
-    try:
-         with open('q-vercel-latency.json', 'r') as f:
-            telemetry_data = json.load(f)
-    except FileNotFoundError:
-        pass
-
+def calculate_p95(data):
+    """Calculates the 95th percentile using linear interpolation (matches standard numpy behavior)"""
+    if not data:
+        return 0
+    sorted_data = sorted(data)
+    idx = (len(sorted_data) - 1) * 0.95
+    lower = math.floor(idx)
+    upper = math.ceil(idx)
+    if lower == upper:
+        return sorted_data[int(idx)]
+    weight = idx - lower
+    return (sorted_data[lower] * (1 - weight)) + (sorted_data[upper] * weight)
 
 @app.post("/")
-def analyze_latency(request: LatencyRequest):
-    results = {}
+def process_analytics(req: AnalyticsRequest):
+    # Locate the JSON file reliably in the Vercel serverless environment
+    # First, try the parent directory (root of the repo)
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    file_path = os.path.join(base_dir, "q-vercel-latency.json")
     
-    # Process each requested region separately
-    for region in request.regions:
-        # Filter the data for the current region
-        region_data = [item for item in telemetry_data if item['region'].lower() == region.lower()]
+    # Fallback to current directory just in case
+    if not os.path.exists(file_path):
+        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "q-vercel-latency.json")
+
+    try:
+        with open(file_path, "r") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        # Prevent hidden 500 crash if file goes missing
+        return {"error": "q-vercel-latency.json not found on server"}
+
+    response = {}
+    for region in req.regions:
+        region_name = region.lower()
+        
+        # Filter data for the specific region
+        region_data = [item for item in data if item.get("region", "").lower() == region_name]
         
         if not region_data:
-            # If a region isn't found, return empty stats for it
-            results[region] = {
+            response[region] = {
                 "avg_latency": 0,
                 "p95_latency": 0,
                 "avg_uptime": 0,
                 "breaches": 0
             }
             continue
-
-        # Extract the specific values into lists for calculation
-        latencies = [item['latency_ms'] for item in region_data]
-        uptimes = [item['uptime_pct'] for item in region_data]
         
-        # Calculate Breaches (count of latencies strictly greater than threshold)
-        breaches = sum(1 for lat in latencies if lat > request.threshold_ms)
+        latencies = [item["latency_ms"] for item in region_data]
+        uptimes = [item["uptime_pct"] for item in region_data]
         
-        # Calculate Averages (Mean)
-        avg_latency = statistics.mean(latencies)
-        avg_uptime = statistics.mean(uptimes)
+        # Calculations
+        avg_latency = sum(latencies) / len(latencies)
+        avg_uptime = sum(uptimes) / len(uptimes)
+        breaches = sum(1 for lat in latencies if lat > req.threshold_ms)
+        p95_latency = calculate_p95(latencies)
         
-        # Calculate p95 Latency
-        # Note: Depending on the exact grading logic, different p95 calculation methods might be expected.
-        # Python 3.8+ statistics module has 'quantiles'
-        p95 = statistics.quantiles(latencies, n=100)[94] # index 94 represents the 95th percentile
-
-        results[region] = {
+        response[region] = {
             "avg_latency": round(avg_latency, 2),
-            "p95_latency": round(p95, 2),
+            "p95_latency": round(p95_latency, 2),
             "avg_uptime": round(avg_uptime, 3),
             "breaches": breaches
         }
         
-    return results
+    return response
